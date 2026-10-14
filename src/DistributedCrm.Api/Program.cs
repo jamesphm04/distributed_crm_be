@@ -1,10 +1,14 @@
+using DistributedCrm.Api.Authentication;
 using DistributedCrm.Application.Abstractions;
 using DistributedCrm.Application.UseCases.ReturnRequests;
 using DistributedCrm.Infrastructure.Caching;
 using DistributedCrm.Infrastructure.Idempotency;
 using DistributedCrm.Infrastructure.Messaging;
 using DistributedCrm.Infrastructure.Persistence;
+using Microsoft.AspNetCore.Authentication.JwtBearer;
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Options;
 using RabbitMQ.Client;
 using StackExchange.Redis;
 
@@ -15,6 +19,44 @@ var builder = WebApplication.CreateBuilder(args);
 builder.Services.AddControllers();
 // Learn more about configuring OpenAPI at https://aka.ms/aspnet/openapi
 builder.Services.AddOpenApi();
+
+builder.Services.AddOptions<GoogleAuthOptions>()
+    .Bind(builder.Configuration.GetSection(GoogleAuthOptions.SectionName))
+    .ValidateDataAnnotations()
+    .ValidateOnStart();
+
+builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
+    .AddJwtBearer();
+
+// Configured through the options pipeline so the client ID comes from the validated GoogleAuthOptions,
+// not a second raw read of IConfiguration.
+builder.Services.AddOptions<JwtBearerOptions>(JwtBearerDefaults.AuthenticationScheme)
+    .Configure<IOptions<GoogleAuthOptions>>((options, googleAuth) =>
+    {
+        // Discovery document + signing keys (JWKS) are fetched from here and refreshed when Google rotates keys.
+        options.Authority = "https://accounts.google.com";
+
+        // Keep Google's claim names ("email", "sub") instead of renaming them to long schema URIs.
+        options.MapInboundClaims = false;
+
+        // Google issues ID tokens with either spelling of its issuer.
+        options.TokenValidationParameters.ValidIssuers = ["https://accounts.google.com", "accounts.google.com"];
+        options.TokenValidationParameters.ValidAudience = googleAuth.Value.ClientId;
+    });
+
+// Singleton: it only holds the allowlist, built once from options.
+builder.Services.AddSingleton<IAuthorizationHandler, AllowedEmailHandler>();
+
+var allowedStaffPolicy = new AuthorizationPolicyBuilder(JwtBearerDefaults.AuthenticationScheme)
+    .RequireAuthenticatedUser()
+    .AddRequirements(new AllowedEmailRequirement())
+    .Build();
+
+// Default policy: what a bare [Authorize] means.
+// Fallback policy: what applies to any endpoint with no [Authorize]/[AllowAnonymous] at all - secure by default.
+builder.Services.AddAuthorizationBuilder()
+    .SetDefaultPolicy(allowedStaffPolicy)
+    .SetFallbackPolicy(allowedStaffPolicy);
 
 builder.Services.AddDbContext<DistributedCrmDbContext>(options =>
     options.UseNpgsql(builder.Configuration.GetConnectionString("DistributedCrm"),
@@ -72,11 +114,13 @@ app.Services.GetRequiredService<IConnection>(); // forces the singleton factory 
 // Configure the HTTP request pipeline.
 if (app.Environment.IsDevelopment())
 {
-    app.MapOpenApi();
+    // The fallback policy would otherwise lock the API description itself.
+    app.MapOpenApi().AllowAnonymous();
 }
 
 app.UseHttpsRedirection();
 
+app.UseAuthentication();
 app.UseAuthorization();
 
 app.MapControllers();

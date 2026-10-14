@@ -3,12 +3,14 @@ using DistributedCrm.Application.Contracts;
 using DistributedCrm.Application.Exceptions;
 using DistributedCrm.Application.UseCases.ReturnRequests;
 using DistributedCrm.Domain.Exceptions;
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 
 namespace DistributedCrm.Api.Controllers;
 
 [ApiController]
+[Authorize]
 [Route("api/return-requests")]
 public class ReturnRequestsController : ControllerBase
 {
