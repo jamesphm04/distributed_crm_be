@@ -7,9 +7,9 @@ using Microsoft.Extensions.Logging;
 
 namespace DistributedCrm.Infrastructure.Messaging;
 
-// Relays rows written by IOutboxStore to RabbitMQ. The write to Postgres (ReturnRequest + OutboxMessage,
+// Relays rows written by IOutboxStore to Service Bus. The write to Postgres (ReturnRequest + OutboxMessage,
 // same DbContext, one SaveChangesAsync) is atomic; this service is what makes the eventual publish durable
-// even if RabbitMQ is unreachable at the moment of creation - it just retries on the next poll.
+// even if Service Bus is unreachable at the moment of creation - it just retries on the next poll.
 public class OutboxPublisherBackgroundService : BackgroundService
 {
     private static readonly TimeSpan PollInterval = TimeSpan.FromSeconds(1);
