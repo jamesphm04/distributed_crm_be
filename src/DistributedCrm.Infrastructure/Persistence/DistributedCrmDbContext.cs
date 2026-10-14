@@ -12,6 +12,7 @@ public class DistributedCrmDbContext : DbContext
     }
 
     public DbSet<ReturnRequest> ReturnRequests => Set<ReturnRequest>();
+    public DbSet<OutboxMessage> OutboxMessages => Set<OutboxMessage>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {

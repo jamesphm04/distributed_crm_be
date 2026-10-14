@@ -81,6 +81,40 @@ namespace DistributedCrm.Infrastructure.Persistence.Migrations
                             t.HasCheckConstraint("ck_return_requests_status", "status IN ('Pending', 'Processing', 'Approved', 'Rejected', 'Cancelled')");
                         });
                 });
+
+            modelBuilder.Entity("DistributedCrm.Infrastructure.Persistence.OutboxMessage", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid")
+                        .HasColumnName("id");
+
+                    b.Property<DateTimeOffset>("CreatedAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("created_at");
+
+                    b.Property<string>("MessageType")
+                        .IsRequired()
+                        .HasMaxLength(100)
+                        .HasColumnType("character varying(100)")
+                        .HasColumnName("message_type");
+
+                    b.Property<DateTimeOffset?>("ProcessedAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("processed_at");
+
+                    b.Property<Guid>("ReturnRequestId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("return_request_id");
+
+                    b.HasKey("Id")
+                        .HasName("pk_outbox_messages");
+
+                    b.HasIndex("ProcessedAt")
+                        .HasDatabaseName("ix_outbox_messages_processed_at");
+
+                    b.ToTable("outbox_messages", (string)null);
+                });
 #pragma warning restore 612, 618
         }
     }

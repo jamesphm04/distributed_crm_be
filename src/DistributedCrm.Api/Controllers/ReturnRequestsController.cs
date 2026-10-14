@@ -1,3 +1,4 @@
+using System.ComponentModel.DataAnnotations;
 using DistributedCrm.Application.Contracts;
 using DistributedCrm.Application.Exceptions;
 using DistributedCrm.Application.UseCases.ReturnRequests;
@@ -60,8 +61,8 @@ public class ReturnRequestsController : ControllerBase
     
     [HttpGet]
     public async Task<ActionResult<PagedResult<ReturnRequestResponse>>> List(
-        [FromQuery] int page = 1,
-        [FromQuery] int pageSize = 20,
+        [FromQuery][Range(1, int.MaxValue)] int page = 1,
+        [FromQuery][Range(1, 100)] int pageSize = 20,
         CancellationToken ct = default)
     {
         var response = await _listHandler.HandleAsync(page, pageSize, ct);

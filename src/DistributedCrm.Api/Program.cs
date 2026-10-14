@@ -23,6 +23,7 @@ builder.Services.AddDbContext<DistributedCrmDbContext>(options =>
 
 builder.Services.AddScoped<IUnitOfWork, UnitOfWork>();
 builder.Services.AddScoped<IReturnRequestRepository, ReturnRequestRepository>();
+builder.Services.AddScoped<IOutboxStore, OutboxStore>();
 
 builder.Services.AddSingleton<IIdempotencyStore, RedisIdempotencyStore>();
 builder.Services.AddSingleton<IReturnRequestCache, RedisReturnRequestCache>();
@@ -34,7 +35,11 @@ builder.Services.AddScoped<ListReturnRequestsHandler>();
 builder.Services.AddScoped<CancelReturnRequestHandler>();
 
 builder.Services.AddSingleton<IConnectionMultiplexer>(_ =>
-    ConnectionMultiplexer.Connect(builder.Configuration.GetConnectionString("Redis")!));
+{
+    var options = ConfigurationOptions.Parse(builder.Configuration.GetConnectionString("Redis")!);
+    options.AbortOnConnectFail = false; // don't throw at startup if Redis isn't ready yet - keep retrying in the background
+    return ConnectionMultiplexer.Connect(options);
+});
 
 builder.Services.AddSingleton<IConnection>(_ =>
 {
@@ -57,6 +62,8 @@ builder.Services.AddSingleton<IConnection>(_ =>
         }
     }
 });
+
+builder.Services.AddHostedService<OutboxPublisherBackgroundService>();
 
 var app = builder.Build();
 

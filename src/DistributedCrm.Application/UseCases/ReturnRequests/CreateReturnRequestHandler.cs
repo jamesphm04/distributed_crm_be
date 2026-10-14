@@ -10,18 +10,18 @@ public class CreateReturnRequestHandler
 {
     private readonly IReturnRequestRepository _repository;
     private readonly IUnitOfWork _unitOfWork;
-    private readonly IReturnRequestQueue _queue;
+    private readonly IOutboxStore _outbox;
     private readonly IIdempotencyStore _idempotencyStore;
 
     public CreateReturnRequestHandler(
         IReturnRequestRepository repository,
         IUnitOfWork unitOfWork,
-        IReturnRequestQueue queue,
+        IOutboxStore outbox,
         IIdempotencyStore idempotencyStore)
     {
         _repository = repository;
         _unitOfWork = unitOfWork;
-        _queue = queue;
+        _outbox = outbox;
         _idempotencyStore = idempotencyStore;
     }
 
@@ -46,12 +46,12 @@ public class CreateReturnRequestHandler
             request.Reason);
         
         await _repository.AddAsync(returnRequest, ct);
-        await _unitOfWork.SaveChangesAsync(ct);
-        
+        await _outbox.EnqueueReturnRequestCreatedAsync(returnRequest.Id, ct);
+        await _unitOfWork.SaveChangesAsync(ct); // row + outbox entry commit together, atomically
+
         var response = returnRequest.ToResponse();
 
         await _idempotencyStore.StoreResultAsync(idempotencyKey, response, ct);
-        await _queue.PublishReturnRequestCreatedAsync(returnRequest.Id, ct);
 
         return response;
     }
