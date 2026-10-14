@@ -17,7 +17,8 @@ builder.Services.AddControllers();
 builder.Services.AddOpenApi();
 
 builder.Services.AddDbContext<DistributedCrmDbContext>(options =>
-    options.UseNpgsql(builder.Configuration.GetConnectionString("DistributedCrm"))
+    options.UseNpgsql(builder.Configuration.GetConnectionString("DistributedCrm"),
+            npgsqlOptions => npgsqlOptions.EnableRetryOnFailure(maxRetryCount: 5))
         .UseSnakeCaseNamingConvention());
 
 builder.Services.AddScoped<IUnitOfWork, UnitOfWork>();
@@ -37,10 +38,24 @@ builder.Services.AddSingleton<IConnectionMultiplexer>(_ =>
 
 builder.Services.AddSingleton<IConnection>(_ =>
 {
-    var factory = new ConnectionFactory { HostName = "localhost", Port = 5672 };
-    var connection = factory.CreateConnectionAsync().GetAwaiter().GetResult();
-    RabbitMqReturnRequestQueue.DeclareTopologyAsync(connection).GetAwaiter().GetResult();
-    return connection;
+    var factory = new ConnectionFactory { HostName = builder.Configuration["RabbitMq:Host"] ?? "localhost", Port = 5672 };
+
+    const int maxAttempts = 10;
+    var delay = TimeSpan.FromSeconds(1);
+    for (var attempt = 1; ; attempt++)
+    {
+        try
+        {
+            var connection = factory.CreateConnectionAsync().GetAwaiter().GetResult();
+            RabbitMqReturnRequestQueue.DeclareTopologyAsync(connection).GetAwaiter().GetResult();
+            return connection;
+        }
+        catch (Exception) when (attempt < maxAttempts)
+        {
+            Thread.Sleep(delay);
+            delay = TimeSpan.FromSeconds(Math.Min(delay.TotalSeconds * 2, 30));
+        }
+    }
 });
 
 var app = builder.Build();
