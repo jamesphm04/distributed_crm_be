@@ -1,14 +1,19 @@
+using Azure.Messaging.ServiceBus;
 using DistributedCrm.Api.Authentication;
 using DistributedCrm.Application.Abstractions;
 using DistributedCrm.Application.UseCases.ReturnRequests;
 using DistributedCrm.Infrastructure.Caching;
+using DistributedCrm.Infrastructure.HealthChecks;
 using DistributedCrm.Infrastructure.Idempotency;
 using DistributedCrm.Infrastructure.Messaging;
 using DistributedCrm.Infrastructure.Persistence;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.AspNetCore.Authorization;
+using Microsoft.AspNetCore.Diagnostics.HealthChecks;
+using Microsoft.AspNetCore.HttpOverrides;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Azure;
+using Microsoft.Extensions.Diagnostics.HealthChecks;
 using Microsoft.Extensions.Options;
 using StackExchange.Redis;
 
@@ -88,9 +93,42 @@ builder.Services.AddSingleton<IConnectionMultiplexer>(_ =>
 builder.Services.AddAzureClients(clients =>
     clients.AddServiceBusClient(builder.Configuration.GetConnectionString("ServiceBus")));
 
+// Singleton: one receiver link for the app's lifetime instead of a new one per probe.
+builder.Services.AddSingleton(sp => new ServiceBusQueueHealthCheck(
+    sp.GetRequiredService<ServiceBusClient>(),
+    ServiceBusReturnRequestQueue.QueueName));
+
+// Dependency checks run only on /health/ready, never on /health/live.
+const string readyTag = "ready";
+builder.Services.AddHealthChecks()
+    .AddDbContextCheck<DistributedCrmDbContext>("postgres", tags: [readyTag])
+    .AddCheck<RedisHealthCheck>("redis", tags: [readyTag])
+    .AddCheck<ServiceBusQueueHealthCheck>("servicebus", tags: [readyTag]);
+
+// A hung dependency fails the probe instead of hanging it. Set here because AddDbContextCheck takes no timeout.
+builder.Services.PostConfigure<HealthCheckServiceOptions>(options =>
+{
+    foreach (var registration in options.Registrations)
+    {
+        registration.Timeout = TimeSpan.FromSeconds(5);
+    }
+});
+
+// Container Apps terminates HTTPS at its ingress and forwards plain HTTP with the original scheme and client IP
+// in X-Forwarded-* headers. The ingress is the only way in, so its (unknown, changing) address is trusted.
+builder.Services.Configure<ForwardedHeadersOptions>(options =>
+{
+    options.ForwardedHeaders = ForwardedHeaders.XForwardedFor | ForwardedHeaders.XForwardedProto;
+    options.KnownIPNetworks.Clear();
+    options.KnownProxies.Clear();
+});
+
 builder.Services.AddHostedService<OutboxPublisherBackgroundService>();
 
 var app = builder.Build();
+
+// First, so everything after it sees the client's real scheme and IP.
+app.UseForwardedHeaders();
 
 // Configure the HTTP request pipeline.
 if (app.Environment.IsDevelopment())
@@ -99,11 +137,15 @@ if (app.Environment.IsDevelopment())
     app.MapOpenApi().AllowAnonymous();
 }
 
-app.UseHttpsRedirection();
-
 app.UseAuthentication();
 app.UseAuthorization();
 
 app.MapControllers();
+
+// Platform probes carry no token. The response is only "Healthy"/"Unhealthy"; failure details go to the log.
+app.MapHealthChecks("/health/live", new HealthCheckOptions { Predicate = _ => false })
+    .AllowAnonymous();
+app.MapHealthChecks("/health/ready", new HealthCheckOptions { Predicate = r => r.Tags.Contains(readyTag) })
+    .AllowAnonymous();
 
 app.Run();

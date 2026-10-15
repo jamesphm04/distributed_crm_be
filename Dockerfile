@@ -14,6 +14,20 @@ RUN dotnet restore src/DistributedCrm.Api/DistributedCrm.Api.csproj
 COPY src/ src/
 RUN dotnet publish src/DistributedCrm.Api/DistributedCrm.Api.csproj -c Release -o /app
 
+# --- Migrations script: every migration as one idempotent SQL file ---
+FROM build AS migrations-script
+COPY dotnet-tools.json .
+RUN dotnet tool restore
+RUN dotnet ef migrations script --idempotent \
+    --project src/DistributedCrm.Infrastructure \
+    --startup-project src/DistributedCrm.Api \
+    --output /migrations/migrate.sql
+
+# --- Migrate: applies the script with psql; connection comes from PG* env vars ---
+FROM postgres:17 AS migrate
+COPY --from=migrations-script /migrations/migrate.sql /migrations/migrate.sql
+ENTRYPOINT ["psql", "-v", "ON_ERROR_STOP=1", "-f", "/migrations/migrate.sql"]
+
 # ---- Runtime stage ----
 FROM mcr.microsoft.com/dotnet/aspnet:10.0 AS runtime
 WORKDIR /app
