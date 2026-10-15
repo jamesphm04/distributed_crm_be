@@ -1,5 +1,6 @@
 using Azure.Messaging.ServiceBus;
 using DistributedCrm.Api.Authentication;
+using DistributedCrm.Api.Configuration;
 using DistributedCrm.Application.Abstractions;
 using DistributedCrm.Application.UseCases.ReturnRequests;
 using DistributedCrm.Infrastructure.Caching;
@@ -18,6 +19,11 @@ using Microsoft.Extensions.Options;
 using StackExchange.Redis;
 
 var builder = WebApplication.CreateBuilder(args);
+
+// Read up front so a missing value stops startup with the variable's name, instead of failing on a request.
+var postgresConnectionString = builder.Configuration.GetRequiredConnectionString("DistributedCrm");
+var redisConnectionString = builder.Configuration.GetRequiredConnectionString("Redis");
+var serviceBusConnectionString = builder.Configuration.GetRequiredConnectionString("ServiceBus");
 
 // Add services to the container.
 
@@ -64,7 +70,7 @@ builder.Services.AddAuthorizationBuilder()
     .SetFallbackPolicy(allowedStaffPolicy);
 
 builder.Services.AddDbContext<DistributedCrmDbContext>(options =>
-    options.UseNpgsql(builder.Configuration.GetConnectionString("DistributedCrm"),
+    options.UseNpgsql(postgresConnectionString,
             npgsqlOptions => npgsqlOptions.EnableRetryOnFailure(maxRetryCount: 5))
         .UseSnakeCaseNamingConvention());
 
@@ -83,7 +89,7 @@ builder.Services.AddScoped<CancelReturnRequestHandler>();
 
 builder.Services.AddSingleton<IConnectionMultiplexer>(_ =>
 {
-    var options = ConfigurationOptions.Parse(builder.Configuration.GetConnectionString("Redis")!);
+    var options = ConfigurationOptions.Parse(redisConnectionString);
     options.AbortOnConnectFail = false; // don't throw at startup if Redis isn't ready yet - keep retrying in the background
     return ConnectionMultiplexer.Connect(options);
 });
@@ -91,7 +97,7 @@ builder.Services.AddSingleton<IConnectionMultiplexer>(_ =>
 // The client connects lazily and retries on its own, so there's no startup retry loop to hand-roll.
 // Phase 10 swaps the connection string for AddServiceBusClientWithNamespace + managed identity.
 builder.Services.AddAzureClients(clients =>
-    clients.AddServiceBusClient(builder.Configuration.GetConnectionString("ServiceBus")));
+    clients.AddServiceBusClient(serviceBusConnectionString));
 
 // Singleton: one receiver link for the app's lifetime instead of a new one per probe.
 builder.Services.AddSingleton(sp => new ServiceBusQueueHealthCheck(

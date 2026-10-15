@@ -31,7 +31,18 @@ ENTRYPOINT ["psql", "-v", "ON_ERROR_STOP=1", "-f", "/migrations/migrate.sql"]
 # ---- Runtime stage ----
 FROM mcr.microsoft.com/dotnet/aspnet:10.0 AS runtime
 WORKDIR /app
+
+# tini as PID 1. The kernel drops a signal PID 1 sends itself unless it has a handler, so a .NET process that
+# crashes (e.g. an unhandled exception at startup) aborts, never dies, and spins at 100% CPU instead of exiting.
+# tini runs the app as its child, so a crash exits the container and Container Apps can restart it.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends tini \
+    && rm -rf /var/lib/apt/lists/*
+
 COPY --from=build /app .
 
 EXPOSE 8080
-ENTRYPOINT ["dotnet", "DistributedCrm.Api.dll"]
+
+# Microsoft's .NET images ship a non-root "app" user (APP_UID=1654); never run the app as root.
+USER $APP_UID
+ENTRYPOINT ["tini", "--", "dotnet", "DistributedCrm.Api.dll"]
