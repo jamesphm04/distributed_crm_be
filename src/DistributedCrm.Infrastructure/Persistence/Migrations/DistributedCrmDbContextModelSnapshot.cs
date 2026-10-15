@@ -107,6 +107,11 @@ namespace DistributedCrm.Infrastructure.Persistence.Migrations
                         .HasColumnType("uuid")
                         .HasColumnName("return_request_id");
 
+                    b.Property<string>("TraceParent")
+                        .HasMaxLength(55)
+                        .HasColumnType("character varying(55)")
+                        .HasColumnName("trace_parent");
+
                     b.HasKey("Id")
                         .HasName("pk_outbox_messages");
 

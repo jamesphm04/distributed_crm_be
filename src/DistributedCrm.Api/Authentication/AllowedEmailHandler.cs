@@ -17,6 +17,13 @@ public sealed class AllowedEmailHandler : AuthorizationHandler<AllowedEmailRequi
 
     protected override Task HandleRequirementAsync(AuthorizationHandlerContext context, AllowedEmailRequirement requirement)
     {
+        // RequireAuthenticatedUser() already rejects anonymous requests (missing, expired or invalid token);
+        // without this, every one of them would also be logged as a missing email.
+        if (context.User.Identity?.IsAuthenticated != true)
+        {
+            return Task.CompletedTask;
+        }
+
         // Raw Google claim names - Program.cs turns off the default renaming to long schema URIs.
         var email = context.User.FindFirst("email")?.Value;
         var emailVerified = context.User.FindFirst("email_verified")?.Value;

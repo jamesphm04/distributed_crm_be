@@ -1,5 +1,7 @@
+using System.Diagnostics;
 using DistributedCrm.Application.Abstractions;
 using DistributedCrm.Infrastructure.Persistence;
+using DistributedCrm.Infrastructure.Telemetry;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
@@ -63,9 +65,36 @@ public class OutboxPublisherBackgroundService : BackgroundService
 
         foreach (var message in pending)
         {
-            await queue.PublishReturnRequestCreatedAsync(message.ReturnRequestId, ct);
-            message.MarkProcessed();
-            await dbContext.SaveChangesAsync(ct);
+            // The send and the UPDATE run inside this span, so the Service Bus message carries the request's trace
+            // to the worker, and the UPDATE is traced (Npgsql skips SQL with no span around it).
+            using var activity = StartRelayActivity(message);
+            try
+            {
+                await queue.PublishReturnRequestCreatedAsync(message.ReturnRequestId, ct);
+                message.MarkProcessed();
+                await dbContext.SaveChangesAsync(ct);
+            }
+            catch (Exception ex)
+            {
+                activity?.AddException(ex);
+                activity?.SetStatus(ActivityStatusCode.Error, ex.Message);
+                throw;
+            }
         }
+    }
+
+    // Continues the trace of the request that wrote the row. With no stored (or a malformed) trace_parent, TryParse
+    // leaves the context empty and the span starts a new trace instead.
+    private static Activity? StartRelayActivity(OutboxMessage message)
+    {
+        ActivityContext.TryParse(message.TraceParent, traceState: null, isRemote: true, out var parentContext);
+
+        var activity = InfrastructureTelemetry.ActivitySource.StartActivity(
+            $"outbox relay {message.MessageType}", ActivityKind.Internal, parentContext);
+        activity?.SetTag("outbox.message.id", message.Id);
+        activity?.SetTag("return_request.id", message.ReturnRequestId);
+        // How long the row waited for the relay: the gap between the request's 201 and the publish.
+        activity?.SetTag("outbox.delay_ms", (int)(DateTimeOffset.UtcNow - message.CreatedAt).TotalMilliseconds);
+        return activity;
     }
 }

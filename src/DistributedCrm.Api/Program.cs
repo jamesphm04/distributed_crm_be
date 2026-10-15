@@ -1,6 +1,8 @@
+using System.Diagnostics;
 using Azure.Messaging.ServiceBus;
 using DistributedCrm.Api.Authentication;
 using DistributedCrm.Api.Configuration;
+using DistributedCrm.Api.Telemetry;
 using DistributedCrm.Application.Abstractions;
 using DistributedCrm.Application.UseCases.ReturnRequests;
 using DistributedCrm.Infrastructure.Caching;
@@ -24,6 +26,8 @@ var builder = WebApplication.CreateBuilder(args);
 var postgresConnectionString = builder.Configuration.GetRequiredConnectionString("DistributedCrm");
 var redisConnectionString = builder.Configuration.GetRequiredConnectionString("Redis");
 var serviceBusConnectionString = builder.Configuration.GetRequiredConnectionString("ServiceBus");
+
+builder.AddTelemetry();
 
 // Add services to the container.
 
@@ -70,8 +74,17 @@ builder.Services.AddAuthorizationBuilder()
     .SetFallbackPolicy(allowedStaffPolicy);
 
 builder.Services.AddDbContext<DistributedCrmDbContext>(options =>
-    options.UseNpgsql(postgresConnectionString,
-            npgsqlOptions => npgsqlOptions.EnableRetryOnFailure(maxRetryCount: 5))
+    options.UseNpgsql(postgresConnectionString, npgsqlOptions => npgsqlOptions
+            .EnableRetryOnFailure(maxRetryCount: 5)
+            // Trace SQL only inside an existing span: the outbox relay's once-a-second poll would otherwise be a
+            // one-span trace every second. Step 11 gives the relay a parent span, so its real work shows up again.
+            // Batches are filtered too because EF Core's SaveChanges sends one. Physical opens can't be filtered,
+            // and the pool reopening idle connections every 5 minutes made root spans, so they're off; the
+            // Npgsql pool metrics still show connection churn.
+            .ConfigureDataSource(dataSource => dataSource.ConfigureTracing(tracing => tracing
+                .ConfigureCommandFilter(_ => Activity.Current is not null)
+                .ConfigureBatchFilter(_ => Activity.Current is not null)
+                .EnablePhysicalOpenTracing(false))))
         .UseSnakeCaseNamingConvention());
 
 builder.Services.AddScoped<IUnitOfWork, UnitOfWork>();

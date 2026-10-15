@@ -18,6 +18,9 @@ public class OutboxMessageConfiguration : IEntityTypeConfiguration<OutboxMessage
         builder.Property(m => m.CreatedAt)
             .IsRequired();
 
+        builder.Property(m => m.TraceParent)
+            .HasMaxLength(OutboxMessage.TraceParentMaxLength);
+
         builder.HasIndex(m => m.ProcessedAt);
     }
 }
