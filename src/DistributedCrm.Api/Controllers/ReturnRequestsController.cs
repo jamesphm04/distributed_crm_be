@@ -52,6 +52,11 @@ public class ReturnRequestsController : ControllerBase
         {
             return Conflict(ex.Message);
         }
+        catch (IdempotencyStoreUnavailableException ex)
+        {
+            Response.Headers.RetryAfter = "5";
+            return StatusCode(StatusCodes.Status503ServiceUnavailable, ex.Message);
+        }
     }
     
     [HttpGet("{id:guid}")]

@@ -104,6 +104,9 @@ builder.Services.AddSingleton<IConnectionMultiplexer>(_ =>
 {
     var options = ConfigurationOptions.Parse(redisConnectionString);
     options.AbortOnConnectFail = false; // don't throw at startup if Redis isn't ready yet - keep retrying in the background
+    // Without a connection, throw at once instead of queueing the command until the 5 s timeout. Callers decide
+    // what a Redis failure means (the cache falls back to Postgres, idempotency returns 503), so waiting buys nothing.
+    options.BacklogPolicy = BacklogPolicy.FailFast;
     return ConnectionMultiplexer.Connect(options);
 });
 
