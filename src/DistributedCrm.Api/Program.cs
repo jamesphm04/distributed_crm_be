@@ -1,10 +1,13 @@
 using System.Diagnostics;
+using Azure.Core;
+using Azure.Identity;
 using Azure.Messaging.ServiceBus;
 using DistributedCrm.Api.Authentication;
 using DistributedCrm.Api.Configuration;
 using DistributedCrm.Api.Telemetry;
 using DistributedCrm.Application.Abstractions;
 using DistributedCrm.Application.UseCases.ReturnRequests;
+using DistributedCrm.Infrastructure.Authentication;
 using DistributedCrm.Infrastructure.Caching;
 using DistributedCrm.Infrastructure.HealthChecks;
 using DistributedCrm.Infrastructure.Idempotency;
@@ -26,6 +29,12 @@ var builder = WebApplication.CreateBuilder(args);
 var postgresConnectionString = builder.Configuration.GetRequiredConnectionString("DistributedCrm");
 var redisConnectionString = builder.Configuration.GetRequiredConnectionString("Redis");
 var serviceBusConnectionString = builder.Configuration.GetRequiredConnectionString("ServiceBus");
+
+// Used only for a dependency whose configuration has no password or key, which means Azure. There it finds the app's
+// managed identity (AZURE_TOKEN_CREDENTIALS narrows the chain to it); on a laptop it would find `az login`.
+var credential = new DefaultAzureCredential();
+builder.Services.AddSingleton<TokenCredential>(credential);
+var redisOptions = await EntraAuthentication.CreateRedisOptionsAsync(redisConnectionString, credential);
 
 builder.AddTelemetry();
 
@@ -81,10 +90,12 @@ builder.Services.AddDbContext<DistributedCrmDbContext>(options =>
             // Batches are filtered too because EF Core's SaveChanges sends one. Physical opens can't be filtered,
             // and the pool reopening idle connections every 5 minutes made root spans, so they're off; the
             // Npgsql pool metrics still show connection churn.
-            .ConfigureDataSource(dataSource => dataSource.ConfigureTracing(tracing => tracing
-                .ConfigureCommandFilter(_ => Activity.Current is not null)
-                .ConfigureBatchFilter(_ => Activity.Current is not null)
-                .EnablePhysicalOpenTracing(false))))
+            .ConfigureDataSource(dataSource => dataSource
+                .UseEntraTokenWhenPasswordless(credential)
+                .ConfigureTracing(tracing => tracing
+                    .ConfigureCommandFilter(_ => Activity.Current is not null)
+                    .ConfigureBatchFilter(_ => Activity.Current is not null)
+                    .EnablePhysicalOpenTracing(false))))
         .UseSnakeCaseNamingConvention());
 
 builder.Services.AddScoped<IUnitOfWork, UnitOfWork>();
@@ -102,18 +113,27 @@ builder.Services.AddScoped<CancelReturnRequestHandler>();
 
 builder.Services.AddSingleton<IConnectionMultiplexer>(_ =>
 {
-    var options = ConfigurationOptions.Parse(redisConnectionString);
-    options.AbortOnConnectFail = false; // don't throw at startup if Redis isn't ready yet - keep retrying in the background
+    redisOptions.AbortOnConnectFail = false; // don't throw at startup if Redis isn't ready yet - keep retrying in the background
     // Without a connection, throw at once instead of queueing the command until the 5 s timeout. Callers decide
     // what a Redis failure means (the cache falls back to Postgres, idempotency returns 503), so waiting buys nothing.
-    options.BacklogPolicy = BacklogPolicy.FailFast;
-    return ConnectionMultiplexer.Connect(options);
+    redisOptions.BacklogPolicy = BacklogPolicy.FailFast;
+    return ConnectionMultiplexer.Connect(redisOptions);
 });
 
 // The client connects lazily and retries on its own, so there's no startup retry loop to hand-roll.
-// Phase 10 swaps the connection string for AddServiceBusClientWithNamespace + managed identity.
 builder.Services.AddAzureClients(clients =>
-    clients.AddServiceBusClient(serviceBusConnectionString));
+{
+    if (EntraAuthentication.IsServiceBusConnectionString(serviceBusConnectionString))
+    {
+        clients.AddServiceBusClient(serviceBusConnectionString);
+    }
+    else
+    {
+        clients.AddServiceBusClientWithNamespace(serviceBusConnectionString);
+    }
+
+    clients.UseCredential(credential);
+});
 
 // Singleton: one receiver link for the app's lifetime instead of a new one per probe.
 builder.Services.AddSingleton(sp => new ServiceBusQueueHealthCheck(
