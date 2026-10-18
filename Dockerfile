@@ -23,10 +23,17 @@ RUN dotnet ef migrations script --idempotent \
     --startup-project src/DistributedCrm.Api \
     --output /migrations/migrate.sql
 
-# --- Migrate: applies the script with psql; connection comes from PG* env vars ---
+# --- Migrate: applies the script with psql, then (in Azure) the app roles; connection comes from PG* env vars ---
 FROM postgres:17 AS migrate
+# curl asks the managed identity for a Postgres token when there is no PGPASSWORD (see migrations/migrate.sh).
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends curl ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
 COPY --from=migrations-script /migrations/migrate.sql /migrations/migrate.sql
-ENTRYPOINT ["psql", "-v", "ON_ERROR_STOP=1", "-f", "/migrations/migrate.sql"]
+COPY migrations/migrate.sh migrations/create-app-role.sql migrations/grant-app-role.sql /migrations/
+# The image's own unprivileged user; the job only needs to run psql.
+USER postgres
+ENTRYPOINT ["/migrations/migrate.sh"]
 
 # ---- Runtime stage ----
 FROM mcr.microsoft.com/dotnet/aspnet:10.0 AS runtime

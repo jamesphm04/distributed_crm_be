@@ -1,7 +1,6 @@
 using System.Diagnostics;
 using Azure.Core;
 using Azure.Identity;
-using Azure.Messaging.ServiceBus;
 using DistributedCrm.Api.Authentication;
 using DistributedCrm.Api.Configuration;
 using DistributedCrm.Api.Telemetry;
@@ -9,7 +8,6 @@ using DistributedCrm.Application.Abstractions;
 using DistributedCrm.Application.UseCases.ReturnRequests;
 using DistributedCrm.Infrastructure.Authentication;
 using DistributedCrm.Infrastructure.Caching;
-using DistributedCrm.Infrastructure.HealthChecks;
 using DistributedCrm.Infrastructure.Idempotency;
 using DistributedCrm.Infrastructure.Messaging;
 using DistributedCrm.Infrastructure.Persistence;
@@ -36,7 +34,7 @@ var credential = new DefaultAzureCredential();
 builder.Services.AddSingleton<TokenCredential>(credential);
 var redisOptions = await EntraAuthentication.CreateRedisOptionsAsync(redisConnectionString, credential);
 
-builder.AddTelemetry();
+builder.AddTelemetry(credential);
 
 // Add services to the container.
 
@@ -135,17 +133,14 @@ builder.Services.AddAzureClients(clients =>
     clients.UseCredential(credential);
 });
 
-// Singleton: one receiver link for the app's lifetime instead of a new one per probe.
-builder.Services.AddSingleton(sp => new ServiceBusQueueHealthCheck(
-    sp.GetRequiredService<ServiceBusClient>(),
-    ServiceBusReturnRequestQueue.QueueName));
-
-// Dependency checks run only on /health/ready, never on /health/live.
+// Readiness decides whether a replica gets traffic, and every replica shares the same dependencies, so a check that
+// fails on one fails on all of them and takes the whole API offline. Only Postgres is checked: without it no request
+// can succeed. Redis and Service Bus are left out because the app already handles them being down (the cache falls
+// back to Postgres, creates return 503, the outbox holds messages until Service Bus is back), and failing readiness
+// would turn that partial degradation into a full outage.
 const string readyTag = "ready";
 builder.Services.AddHealthChecks()
-    .AddDbContextCheck<DistributedCrmDbContext>("postgres", tags: [readyTag])
-    .AddCheck<RedisHealthCheck>("redis", tags: [readyTag])
-    .AddCheck<ServiceBusQueueHealthCheck>("servicebus", tags: [readyTag]);
+    .AddDbContextCheck<DistributedCrmDbContext>("postgres", tags: [readyTag]);
 
 // A hung dependency fails the probe instead of hanging it. Set here because AddDbContextCheck takes no timeout.
 builder.Services.PostConfigure<HealthCheckServiceOptions>(options =>

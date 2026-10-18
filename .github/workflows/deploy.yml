@@ -1,0 +1,101 @@
+name: Deploy
+
+# Manual: the Azure environment only exists during working sessions (infra/deploy.sh up ... down), so a deploy on
+# every push to main would fail whenever it's down. Run it from the Actions tab once the environment is up
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  # Lets the job ask GitHub for its OIDC token, which Azure exchanges for a token as id-dcrm-github
+  id-token: write
+
+# One deploy at a time; a second run waits instead of racing the first
+concurrency:
+  group: deploy-dev
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-24.04
+    # Must match the federated credential's subject (repo:<owner>/<repo>:environment:dev), or Azure refuses the token.
+    environment: dev
+    env:
+      RESOURCE_GROUP: rg-dcrm-dev
+      STACK: dcrm-dev
+      MIGRATE_JOB: caj-dcrm-migrate-dev
+      # Every image is tagged with the commit it was built from, so a revision always says which code it runs
+      IMAGE_TAG: ${{ github.sha }}
+    steps:
+      - name: Check out the code
+        uses: actions/checkout@v7
+
+      # OIDC: the three values are IDs, not credentials. No secret exists anywhere.
+      - name: Sign in to Azure
+        uses: azure/login@v3
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      # The stack's outputs (host names, identity IDs, registry) change with every rebuild of the environment, so
+      # they're read fresh on every run and passed to app.bicep as its "stack" parameter.
+      - name: Read the environment
+        run: |
+          az stack sub show --name "$STACK" --query outputs -o json \
+            | jq '{
+                "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#",
+                contentVersion: "1.0.0.0",
+                parameters: { stack: { value: map_values(.value) } }
+              }' > stack.parameters.json
+          echo "REGISTRY=$(jq -r '.parameters.stack.value.registryLoginServer' stack.parameters.json)" >> "$GITHUB_ENV"
+
+      - name: Build and push the images
+        run: |
+          az acr login --name "${REGISTRY%%.*}"
+          docker build --tag "$REGISTRY/distributed-crm-be:$IMAGE_TAG" .
+          docker build --target migrate --tag "$REGISTRY/distributed-crm-migrate:$IMAGE_TAG" .
+          docker push "$REGISTRY/distributed-crm-be:$IMAGE_TAG"
+          docker push "$REGISTRY/distributed-crm-migrate:$IMAGE_TAG"
+
+      # Only the job, so the new API doesn't exist yet when the migrations run.
+      - name: Deploy the migration job
+        run: |
+          az deployment group create --resource-group "$RESOURCE_GROUP" --name "be-migrate-${{ github.run_id }}" \
+            --template-file infra/app.bicep --parameters stack.parameters.json \
+            --parameters imageTag="$IMAGE_TAG" deployApi=false --output none
+
+      # A failed migration fails the workflow here, before the API is touched.
+      - name: Run the migrations
+        run: |
+          execution="$(az containerapp job start --resource-group "$RESOURCE_GROUP" --name "$MIGRATE_JOB" \
+            --query name -o tsv)"
+          echo "Started $execution"
+          for _ in $(seq 1 60); do
+            status="$(az containerapp job execution show --resource-group "$RESOURCE_GROUP" --name "$MIGRATE_JOB" \
+              --job-execution-name "$execution" --query properties.status -o tsv)"
+            echo "Migration: $status"
+            case "$status" in
+              Succeeded) exit 0 ;;
+              Failed|Stopped|Degraded)
+                az containerapp job logs show --resource-group "$RESOURCE_GROUP" --name "$MIGRATE_JOB" \
+                  --execution "$execution" --container migrate --tail 100 || true
+                exit 1 ;;
+            esac
+            sleep 10
+          done
+          echo "The migration didn't finish within 10 minutes." >&2
+          exit 1
+
+      - name: Deploy the API
+        run: |
+          api_url="$(az deployment group create --resource-group "$RESOURCE_GROUP" --name "be-api-${{ github.run_id }}" \
+            --template-file infra/app.bicep --parameters stack.parameters.json \
+            --parameters imageTag="$IMAGE_TAG" deployApi=true \
+            --query properties.outputs.apiUrl.value -o tsv)"
+          echo "API_URL=$api_url" >> "$GITHUB_ENV"
+          echo "Deployed to $api_url"
+
+      # Proves the new revision is up and can reach Postgres through the public URL, as a user would hit it.
+      - name: Check the API is ready
+        run: curl --fail --silent --show-error --retry 12 --retry-delay 10 --retry-all-errors "$API_URL/health/ready"
