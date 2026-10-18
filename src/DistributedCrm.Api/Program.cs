@@ -101,7 +101,15 @@ builder.Services.AddScoped<IReturnRequestRepository, ReturnRequestRepository>();
 builder.Services.AddScoped<IOutboxStore, OutboxStore>();
 
 builder.Services.AddSingleton<IIdempotencyStore, RedisIdempotencyStore>();
-builder.Services.AddSingleton<IReturnRequestCache, RedisReturnRequestCache>();
+// Caching:Enabled=false bypasses the cache (reads go straight to Postgres); on unless set.
+if (builder.Configuration.GetValue("Caching:Enabled", true))
+{
+    builder.Services.AddSingleton<IReturnRequestCache, RedisReturnRequestCache>();
+}
+else
+{
+    builder.Services.AddSingleton<IReturnRequestCache, NoOpReturnRequestCache>();
+}
 builder.Services.AddSingleton<IReturnRequestQueue, ServiceBusReturnRequestQueue>();
 
 builder.Services.AddScoped<CreateReturnRequestHandler>();
